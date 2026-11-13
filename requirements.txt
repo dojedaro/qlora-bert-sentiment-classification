@@ -1,0 +1,18 @@
+# Packages the notebook imports or installs. Versions were not recorded when it was run;
+# pin them (pip freeze) after a successful run to make it fully reproducible.
+accelerate
+bitsandbytes
+datasets
+evaluate
+kaleido
+matplotlib
+numpy
+pandas
+peft
+plotly
+psutil
+scikit-learn
+seaborn
+torch
+transformers
+wandb
