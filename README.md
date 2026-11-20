@@ -1,73 +1,113 @@
-# QLoRA Fine-Tuning of BERT for Sentiment Classification
+# QLoRA vs. LoRA vs. Full Fine-Tuning of BERT, Measured
 
-**Fine-tuning a 4-bit quantized `bert-base-uncased` with LoRA adapters on IMDB reviews: 91.6% test accuracy while training 0.44% of the weights, in 13 minutes on one GPU.**
+**What does QLoRA actually buy on a small model? Trained three ways on the same GPU and data, `bert-base-uncased` reaches 92.3% on IMDB sentiment with full fine-tuning and 91.6% with both LoRA and QLoRA. Training only adapters cuts peak memory from 2.32 GB to about 1.2 GB, but the 4-bit part of QLoRA adds nothing on top: plain LoRA uses as little memory (1.23 vs. 1.29 GB), trains faster (14.2 vs. 17.4 minutes) and predicts twice as fast (15.5 vs. 31.7 ms).** 4-bit quantization earns its keep on models too large to fit on the GPU otherwise; on a 110M-parameter model it is pure overhead. The measurement is the point: the original version of this project claimed a 16.5x memory saving from an unmeasured estimate.
 
-[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/dojedaro/qlora-bert-sentiment-classification/blob/main/notebook/Finetuning_LLMs_LoRA.ipynb)
-[![Notebook checks](https://github.com/dojedaro/qlora-bert-sentiment-classification/actions/workflows/notebooks.yml/badge.svg)](https://github.com/dojedaro/qlora-bert-sentiment-classification/actions/workflows/notebooks.yml)
+[![CI](https://github.com/dojedaro/qlora-bert-sentiment-classification/actions/workflows/ci.yml/badge.svg)](https://github.com/dojedaro/qlora-bert-sentiment-classification/actions/workflows/ci.yml)
+[![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/dojedaro/qlora-bert-sentiment-classification/blob/main/notebooks/run_experiment.ipynb)
 
 ## Results
 
-Test set: 10,000 held-out reviews (48.8% positive), never seen during training or early stopping.
+IMDB reviews ([`dipanjanS/imdb_sentiment_finetune_dataset20k`](https://huggingface.co/datasets/dipanjanS/imdb_sentiment_finetune_dataset20k)):
+8,000 train, 2,000 validation (used to pick the best epoch), 10,000 test (scored once). One Tesla
+T4, 3 epochs, batch size 16, max 512 tokens, seed 42.
 
-| Metric | Value |
-|---|---|
-| Accuracy | **0.9163** |
-| Precision / Recall / F1 | 0.9163 / 0.9163 / 0.9163 |
-| AUC-ROC | **0.9707** |
-| Errors | 435 false negatives, 402 false positives (balanced) |
-| Trainable parameters | 296,450 (0.44%) |
-| Training time | 762 s for 3 epochs, 31.5 samples/s |
-| Peak GPU memory (measured) | 0.97 GB |
-| Inference | 60 ms per review, batch size 1 |
+| | Full fine-tuning | LoRA | QLoRA |
+|---|---|---|---|
+| Base model weights | 32-bit, trained | 32-bit, frozen | 4-bit NF4, frozen |
+| Trainable parameters | 109.5M (100%) | 0.30M (0.27%) | 0.30M (0.27%) |
+| **Test accuracy** (95% CI) | **92.31%** (91.8–92.8) | 91.57% (91.0–92.1) | 91.63% (91.1–92.2) |
+| Test ROC AUC | 0.974 | 0.971 | 0.972 |
+| Peak GPU memory, training | 2.32 GB | **1.23 GB** | 1.29 GB |
+| Training time | 17.1 min | **14.2 min** | 17.4 min |
+| Latency, 1 review (median) | **10.1 ms** | 15.5 ms | 31.7 ms |
 
-Validation accuracy (2,000 reviews) was 0.918, so the test score isn't the product of tuning on test data.
+Confidence intervals are binomial (±0.5 points at n = 10,000); differences under about a point are
+within noise for a single run. Each method ran in its own process, so peak memory starts from a
+clean GPU; gradient checkpointing is on for all three, and latency is the median over 55 real test
+reviews at batch size 1 under the same fp16 autocast.
 
-**What I didn't measure.** The notebook also prints a "16.5x less memory than full fine-tuning"
-figure. That compares the measured 0.97 GB against an *estimated* 16 GB for full fine-tuning, and
-another cell estimates full fine-tuning at about 1.0 GB, so the estimates disagree. Neither was
-measured. The defensible claim is the one in the table: the whole run peaked under 1 GB of GPU memory.
-(The notebook's "67M total parameters" is lower than BERT-base's ~110M because 4-bit layers report
-packed weights.)
+**Provenance:** one Colab T4 session. Full fine-tuning ran first, on the code before two fixes
+that only touch the adapter arms (an unquantized classification head for QLoRA, input gradients for
+LoRA) and before adapter-movement logging was added, which is why `full.json` has no
+`adapter_weight_change` field. LoRA and QLoRA then ran on the fixed code. The files in
+[`results/`](results/) are the JSON each run printed, copied from the notebook output.
+
+- **The memory saving comes from training only adapters, not from 4-bit storage.** LoRA, with a
+  32-bit frozen base, peaks at 1.23 GB; QLoRA at 1.29 GB. What full fine-tuning adds is gradients
+  and Adam optimizer state for all 110M weights. The frozen base itself (about 0.44 GB in 32 bits)
+  is small next to activations, so storing it in 4 bits saves nothing measurable at this size.
+- **4-bit costs speed.** QLoRA trains 23% slower than LoRA (17.4 vs. 14.2 minutes) and predicts 2x
+  slower (31.7 vs. 15.5 ms), because the weights are dequantized on every forward pass.
+- **Adapters cost about 0.7 points of accuracy.** LoRA (91.57%) and QLoRA (91.63%) are
+  indistinguishable; full fine-tuning (92.31%) is ahead by about 0.7 points, at the edge of what a
+  single run can resolve.
+- **The adapters really trained:** the LoRA weights moved by a mean absolute 0.0072 (LoRA) and
+  0.0074 (QLoRA); the run records this so an adapter that silently stays at its initial value
+  would show up as 0.
+
+## Why three arms
+
+Comparing QLoRA only with full fine-tuning mixes two changes. LoRA keeps the 32-bit base and trains
+the same adapters as QLoRA, so:
+
+- **full vs. LoRA** isolates the effect of training only small adapters;
+- **LoRA vs. QLoRA** isolates the effect of storing the frozen base in 4 bits.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    D[IMDB reviews<br/>8k train / 2k val / 10k test] --> T[BERT tokenizer<br/>max 512 tokens]
-    T --> Q[bert-base-uncased<br/>loaded in 4-bit NF4<br/>+ double quantization]
-    Q --> L[LoRA adapters<br/>r=8, alpha=16, dropout 0.05]
-    L --> TR[Trainer: fp16, gradient<br/>checkpointing, early stopping]
-    TR --> E[Accuracy, F1, AUC,<br/>confusion matrix, latency]
+    D[IMDB 20k<br/>8k / 2k / 10k] --> T[Tokenize<br/>max 512, dynamic padding]
+    T --> F[Full fine-tuning<br/>lr 2e-5]
+    T --> L[LoRA r=8 on query/value<br/>32-bit frozen base, lr 2e-4]
+    T --> Q[QLoRA: same adapters<br/>4-bit NF4 base, lr 2e-4]
+    F & L & Q --> E[Best epoch by validation<br/>accuracy, then test once]
 ```
 
-- **QLoRA** keeps the base model frozen in 4-bit NF4 precision and trains small low-rank adapter
-  matrices in 16-bit. Only the adapters and the classification head get gradients.
-- **Memory savers:** fp16 training, gradient checkpointing and dynamic padding.
-- **Tracking:** Weights & Biases logs every run.
+- [`core.py`](src/qlora_bert/core.py): configuration and metrics with no GPU dependency, unit-tested
+  in CI.
+- [`experiment.py`](src/qlora_bert/experiment.py): one method per process. Each run records
+  accuracy, F1, AUC, error counts, peak allocated and reserved GPU memory, training time, latency,
+  and how much the adapter weights moved (a guard against adapters that silently never train).
+- QLoRA keeps the new classification head in full precision; LoRA enables input gradients so the
+  adapters train under gradient checkpointing. Both were bugs found while building this, and both
+  are commented where they are fixed.
 
 ## Run it
 
-Needs a CUDA GPU (Colab's free T4 works) because `bitsandbytes` 4-bit kernels are GPU-only.
-
 ```bash
-pip install -r requirements.txt
-jupyter notebook notebook/Finetuning_LLMs_LoRA.ipynb
+pip install -e ".[dev]" && pytest                      # CPU: config and metric tests
+pip install -e ".[gpu]"                                 # needs a CUDA GPU
+python -m qlora_bert.experiment --method full  --out results
+python -m qlora_bert.experiment --method lora  --out results
+python -m qlora_bert.experiment --method qlora --out results
 ```
 
-The dataset (`dipanjanS/imdb_sentiment_finetune_dataset20k`) downloads from the Hugging Face Hub.
-W&B logging asks for an API key; set `WANDB_MODE=disabled` to skip it.
+Or open the notebook with the Colab badge (T4 runtime). `--max-steps 20` gives a quick smoke test.
+
+## Limitations
+
+- **One seed per method.** Accuracy differences under about a point are not resolved; three seeds
+  per arm would be the next step.
+- **Test predictions were not saved**, so there is no paired test between methods, only separate
+  intervals.
+- **Small model.** At 110M parameters the frozen base is a small share of training memory; the 4-bit
+  savings grow with model size, which this run does not test.
+- **Unmerged adapters at inference.** LoRA weights can be merged into the base for serving, which
+  would make LoRA latency match full fine-tuning; QLoRA's 4-bit base cannot be merged without
+  dequantizing.
+
+## Earlier version
+
+The first version of this repository was a single notebook. It reported 91.6% QLoRA accuracy (this
+run reproduces it: 91.63%) but compared it with an estimated, never-measured full fine-tuning run,
+and plotted the estimate as "16.5x less memory". Measured on the same GPU, the saving is 1.8x
+(2.32 GB to 1.29 GB). The original notebook is in the git history.
 
 ## Stack
 
-Python, PyTorch, Hugging Face Transformers, PEFT, bitsandbytes, Accelerate, Datasets, scikit-learn, Weights & Biases.
-
-## Limitations and next steps
-
-- **Measure the comparison it claims:** run full fine-tuning on the same GPU and split, and report
-  accuracy, peak memory and time side by side.
-- BERT is small enough to fine-tune fully on most GPUs; QLoRA pays off on models of 7B+ parameters.
-  The same recipe on a decoder LLM would make the efficiency argument for real.
-- One run, one seed. Report a mean and spread over 3 seeds.
+Python, PyTorch, Hugging Face Transformers, PEFT, bitsandbytes, Datasets, scikit-learn; pytest and
+ruff in CI.
 
 ## License
 
