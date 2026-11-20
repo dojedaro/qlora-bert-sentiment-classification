@@ -1,0 +1,30 @@
+{
+  "config": {
+    "method": "full",
+    "epochs": 3,
+    "batch_size": 16,
+    "max_length": 512,
+    "seed": 42,
+    "learning_rate": 2e-05
+  },
+  "validation": {
+    "accuracy": 0.9285,
+    "f1": 0.9284,
+    "auc": 0.9796
+  },
+  "test": {
+    "accuracy": 0.9231,
+    "f1": 0.9231,
+    "auc": 0.9737
+  },
+  "test_errors": {
+    "false_positives": 468,
+    "false_negatives": 301
+  },
+  "trainable_parameters": 109483778,
+  "peak_gpu_memory_gb": 2.32,
+  "peak_gpu_memory_reserved_gb": 3.33,
+  "train_seconds": 1023.7,
+  "latency_ms_batch1": 10.1,
+  "gpu": "Tesla T4"
+}

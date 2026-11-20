@@ -1,0 +1,31 @@
+{
+  "config": {
+    "method": "lora",
+    "epochs": 3,
+    "batch_size": 16,
+    "max_length": 512,
+    "seed": 42,
+    "learning_rate": 0.0002
+  },
+  "validation": {
+    "accuracy": 0.9185,
+    "f1": 0.9184,
+    "auc": 0.9766
+  },
+  "test": {
+    "accuracy": 0.9157,
+    "f1": 0.9157,
+    "auc": 0.9713
+  },
+  "test_errors": {
+    "false_positives": 469,
+    "false_negatives": 374
+  },
+  "trainable_parameters": 296450,
+  "adapter_weight_change": 0.007244,
+  "peak_gpu_memory_gb": 1.23,
+  "peak_gpu_memory_reserved_gb": 2.26,
+  "train_seconds": 850.9,
+  "latency_ms_batch1": 15.5,
+  "gpu": "Tesla T4"
+}

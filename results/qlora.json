@@ -1,0 +1,31 @@
+{
+  "config": {
+    "method": "qlora",
+    "epochs": 3,
+    "batch_size": 16,
+    "max_length": 512,
+    "seed": 42,
+    "learning_rate": 0.0002
+  },
+  "validation": {
+    "accuracy": 0.922,
+    "f1": 0.9219,
+    "auc": 0.9759
+  },
+  "test": {
+    "accuracy": 0.9163,
+    "f1": 0.9163,
+    "auc": 0.9716
+  },
+  "test_errors": {
+    "false_positives": 495,
+    "false_negatives": 342
+  },
+  "trainable_parameters": 296450,
+  "adapter_weight_change": 0.007443,
+  "peak_gpu_memory_gb": 1.29,
+  "peak_gpu_memory_reserved_gb": 2.13,
+  "train_seconds": 1046.4,
+  "latency_ms_batch1": 31.7,
+  "gpu": "Tesla T4"
+}
