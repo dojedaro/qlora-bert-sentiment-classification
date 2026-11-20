@@ -63,6 +63,10 @@ def build_model(config: Config) -> torch.nn.Module:
         model = prepare_model_for_kbit_training(model)
     else:
         model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID, num_labels=2)
+        # With the base frozen, checkpointed layers would receive inputs that need no gradient and
+        # the adapters inside them would never train. (prepare_model_for_kbit_training does this
+        # for the qlora arm.)
+        model.enable_input_require_grads()
     lora = LoraConfig(
         r=8,
         lora_alpha=16,
@@ -119,6 +123,7 @@ def run(config: Config, out: Path, max_steps: int = -1) -> dict:
 
     model = build_model(config)
     trainable = trainable_parameters(model)
+    adapters_before = _adapter_snapshot(model)
     args = TrainingArguments(
         output_dir=str(out / f"checkpoints_{config.method}"),
         num_train_epochs=config.epochs,
@@ -155,7 +160,9 @@ def run(config: Config, out: Path, max_steps: int = -1) -> dict:
     started = time.perf_counter()
     trainer.train()
     train_seconds = time.perf_counter() - started
-    peak_memory = torch.cuda.max_memory_allocated() / 1e9  # training peak, before evaluation
+    peak_memory = (
+        torch.cuda.max_memory_allocated() / 1e9
+    )  # training run, incl. per-epoch evaluation
     peak_reserved = torch.cuda.max_memory_reserved() / 1e9
 
     validation = classification_metrics(*_logits_and_labels(trainer, data["validation"]))
@@ -169,6 +176,9 @@ def run(config: Config, out: Path, max_steps: int = -1) -> dict:
             "false_negatives": int(((test_logits.argmax(1) == 0) & (test_labels == 1)).sum()),
         },
         "trainable_parameters": trainable,
+        # Guards against adapters that silently never train: mean absolute change of the LoRA
+        # weights over training (0 for the full method, which has no adapters).
+        "adapter_weight_change": _adapter_change(adapters_before, model),
         "peak_gpu_memory_gb": round(peak_memory, 2),
         "peak_gpu_memory_reserved_gb": round(peak_reserved, 2),
         "train_seconds": round(train_seconds, 1),
@@ -178,6 +188,24 @@ def run(config: Config, out: Path, max_steps: int = -1) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     (out / f"{config.method}.json").write_text(json.dumps(result, indent=2))
     return result
+
+
+def _adapter_snapshot(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    return {
+        name: p.detach().float().cpu().clone()
+        for name, p in model.named_parameters()
+        if "lora_" in name and p.requires_grad
+    }
+
+
+def _adapter_change(before: dict[str, torch.Tensor], model: torch.nn.Module) -> float:
+    if not before:
+        return 0.0
+    after = dict(model.named_parameters())
+    changes = [
+        (after[name].detach().float().cpu() - w).abs().mean().item() for name, w in before.items()
+    ]
+    return round(float(np.mean(changes)), 6)
 
 
 def _logits_and_labels(trainer: Trainer, dataset) -> tuple[np.ndarray, np.ndarray]:
