@@ -10,7 +10,7 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 
 @dataclass(frozen=True)
 class Config:
-    method: str  # "qlora" or "full"
+    method: str  # "qlora", "lora" or "full"
     epochs: int = 3
     batch_size: int = 16
     max_length: int = 512
@@ -20,10 +20,10 @@ class Config:
     learning_rate: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.method not in {"qlora", "full"}:
+        if self.method not in {"qlora", "lora", "full"}:
             raise ValueError(f"unknown method {self.method!r}")
         if not self.learning_rate:
-            object.__setattr__(self, "learning_rate", 2e-4 if self.method == "qlora" else 2e-5)
+            object.__setattr__(self, "learning_rate", 2e-5 if self.method == "full" else 2e-4)
 
 
 def classification_metrics(logits: np.ndarray, labels: np.ndarray) -> dict[str, float]:

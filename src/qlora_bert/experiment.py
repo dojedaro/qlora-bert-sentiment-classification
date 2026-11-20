@@ -1,6 +1,7 @@
-"""QLoRA vs. full fine-tuning of BERT on IMDB reviews, measured on the same GPU and split.
+"""QLoRA vs. LoRA vs. full fine-tuning of BERT on IMDB reviews, measured on the same GPU and split.
 
     python -m qlora_bert.experiment --method qlora --out results
+    python -m qlora_bert.experiment --method lora  --out results
     python -m qlora_bert.experiment --method full  --out results
 
 Run each method in its own process so peak GPU memory is measured from a clean start.
@@ -36,23 +37,29 @@ MODEL_ID = "bert-base-uncased"
 
 
 def build_model(config: Config) -> torch.nn.Module:
+    """``full``: every weight trains. ``lora``: frozen 32-bit BERT + adapters. ``qlora``: frozen
+    4-bit BERT + the same adapters. lora vs. qlora isolates the effect of 4-bit quantization;
+    lora vs. full isolates the effect of training only adapters."""
     if config.method == "full":
         return AutoModelForSequenceClassification.from_pretrained(MODEL_ID, num_labels=2)
 
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 
-    model = AutoModelForSequenceClassification.from_pretrained(
-        MODEL_ID,
-        num_labels=2,
-        quantization_config=BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.float16,
-        ),
-        device_map={"": 0},
-    )
-    model = prepare_model_for_kbit_training(model)
+    if config.method == "qlora":
+        model = AutoModelForSequenceClassification.from_pretrained(
+            MODEL_ID,
+            num_labels=2,
+            quantization_config=BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=torch.float16,
+            ),
+            device_map={"": 0},
+        )
+        model = prepare_model_for_kbit_training(model)
+    else:
+        model = AutoModelForSequenceClassification.from_pretrained(MODEL_ID, num_labels=2)
     lora = LoraConfig(
         r=8,
         lora_alpha=16,
@@ -68,27 +75,39 @@ def trainable_parameters(model: torch.nn.Module) -> int:
 
 
 @torch.inference_mode()
-def latency_ms(model: torch.nn.Module, tokenizer, text: str, repeats: int = 50) -> float:
-    """Median single-review latency (batch size 1) after warm-up."""
+def latency_ms(model: torch.nn.Module, tokenizer, texts: list[str]) -> float:
+    """Median latency for one review at a time (batch size 1) over real test reviews, under the
+    same fp16 autocast for every method, after a warm-up."""
     model.eval()
-    inputs = tokenizer(text, truncation=True, max_length=512, return_tensors="pt").to("cuda")
-    for _ in range(5):
-        model(**inputs)
+    inputs = [
+        tokenizer(text, truncation=True, max_length=512, return_tensors="pt").to("cuda")
+        for text in texts
+    ]
     timings = []
-    for _ in range(repeats):
-        torch.cuda.synchronize()
-        start = time.perf_counter()
-        model(**inputs)
-        torch.cuda.synchronize()
-        timings.append((time.perf_counter() - start) * 1000)
+    with torch.autocast("cuda", dtype=torch.float16):
+        for batch in inputs[:5]:
+            model(**batch)
+        for batch in inputs:
+            torch.cuda.synchronize()
+            start = time.perf_counter()
+            model(**batch)
+            torch.cuda.synchronize()
+            timings.append((time.perf_counter() - start) * 1000)
     return round(float(np.median(timings)), 1)
 
 
-def run(config: Config, out: Path) -> dict:
+def run(config: Config, out: Path, max_steps: int = -1) -> dict:
+    if not torch.cuda.is_available():
+        raise SystemExit("A CUDA GPU is required (bitsandbytes 4-bit kernels are GPU-only).")
     torch.manual_seed(config.seed)
     torch.cuda.reset_peak_memory_stats()
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
-    data = load_dataset(DATASET_ID).map(
+    raw = load_dataset(DATASET_ID)
+    labels = set(raw["train"].unique("sentiment"))
+    if labels != {0, 1}:
+        raise ValueError(f"expected 0/1 sentiment labels, found {labels}")
+    latency_reviews = raw["test"].shuffle(seed=config.seed).select(range(55))["review"]
+    data = raw.map(
         lambda batch: tokenizer(batch["review"], truncation=True, max_length=config.max_length),
         batched=True,
         remove_columns=["review"],
@@ -104,14 +123,16 @@ def run(config: Config, out: Path) -> dict:
         per_device_eval_batch_size=64,
         learning_rate=config.learning_rate,
         weight_decay=0.01,
-        warmup_ratio=0.06,
+        # warmup_ratio was removed in transformers 5; an explicit step count works everywhere.
+        warmup_steps=int(0.06 * len(data["train"]) / config.batch_size * config.epochs),
         eval_strategy="epoch",
         save_strategy="epoch",
         save_total_limit=1,
         load_best_model_at_end=True,  # best epoch by validation accuracy, never by test
         metric_for_best_model="accuracy",
         fp16=True,
-        gradient_checkpointing=config.method == "qlora",
+        gradient_checkpointing=True,  # same for every method, so memory differences are fair
+        max_steps=max_steps,  # -1 trains full epochs; a small number gives a quick smoke test
         logging_steps=50,
         report_to="none",
         seed=config.seed,
@@ -131,7 +152,8 @@ def run(config: Config, out: Path) -> dict:
     started = time.perf_counter()
     trainer.train()
     train_seconds = time.perf_counter() - started
-    peak_memory = torch.cuda.max_memory_allocated() / 1e9
+    peak_memory = torch.cuda.max_memory_allocated() / 1e9  # training peak, before evaluation
+    peak_reserved = torch.cuda.max_memory_reserved() / 1e9
 
     validation = classification_metrics(*_logits_and_labels(trainer, data["validation"]))
     test_logits, test_labels = _logits_and_labels(trainer, data["test"])
@@ -145,10 +167,9 @@ def run(config: Config, out: Path) -> dict:
         },
         "trainable_parameters": trainable,
         "peak_gpu_memory_gb": round(peak_memory, 2),
+        "peak_gpu_memory_reserved_gb": round(peak_reserved, 2),
         "train_seconds": round(train_seconds, 1),
-        "latency_ms_batch1": latency_ms(
-            model, tokenizer, "A slow start, but the ending won me over."
-        ),
+        "latency_ms_batch1": latency_ms(model, tokenizer, latency_reviews),
         "gpu": torch.cuda.get_device_name(0),
     }
     out.mkdir(parents=True, exist_ok=True)
@@ -163,11 +184,12 @@ def _logits_and_labels(trainer: Trainer, dataset) -> tuple[np.ndarray, np.ndarra
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--method", choices=["qlora", "full"], required=True)
+    parser.add_argument("--method", choices=["qlora", "lora", "full"], required=True)
     parser.add_argument("--out", type=Path, default=Path("results"))
     parser.add_argument("--epochs", type=int, default=3)
+    parser.add_argument("--max-steps", type=int, default=-1, help="cap steps for a smoke test")
     args = parser.parse_args()
-    result = run(Config(method=args.method, epochs=args.epochs), args.out)
+    result = run(Config(method=args.method, epochs=args.epochs), args.out, args.max_steps)
     print(json.dumps(result, indent=2))
 
 

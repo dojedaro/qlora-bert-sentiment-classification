@@ -6,13 +6,14 @@ from qlora_bert.core import Config, classification_metrics
 
 def test_learning_rate_defaults_differ_by_method():
     assert Config("qlora").learning_rate == 2e-4
+    assert Config("lora").learning_rate == 2e-4
     assert Config("full").learning_rate == 2e-5
     assert Config("full", learning_rate=1e-5).learning_rate == 1e-5
 
 
 def test_unknown_method_is_rejected():
     with pytest.raises(ValueError):
-        Config("lora")
+        Config("adapters")
 
 
 def test_metrics_from_logits():
