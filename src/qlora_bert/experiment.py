@@ -54,6 +54,9 @@ def build_model(config: Config) -> torch.nn.Module:
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True,
                 bnb_4bit_compute_dtype=torch.float16,
+                # The new classification head is trained in full; quantizing it would leave PEFT a
+                # 4-bit copy to train, which bitsandbytes cannot run.
+                llm_int8_skip_modules=["classifier"],
             ),
             device_map={"": 0},
         )
