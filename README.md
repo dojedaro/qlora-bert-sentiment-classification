@@ -26,10 +26,11 @@ within noise for a single run. Each method ran in its own process, so peak memor
 clean GPU; gradient checkpointing is on for all three, and latency is the median over 55 real test
 reviews at batch size 1 under the same fp16 autocast.
 
-**Provenance:** one Colab T4 session. Full fine-tuning ran at commit `e4e2707`; LoRA and QLoRA ran
-at `e43ac3d`, after two fixes that only affect them (an unquantized classification head for QLoRA,
-input gradients for LoRA) and the adapter-movement logging. Raw outputs are in
-[`results/`](results/).
+**Provenance:** one Colab T4 session. Full fine-tuning ran first, on the code before two fixes
+that only touch the adapter arms (an unquantized classification head for QLoRA, input gradients for
+LoRA) and before adapter-movement logging was added, which is why `full.json` has no
+`adapter_weight_change` field. LoRA and QLoRA then ran on the fixed code. The files in
+[`results/`](results/) are the JSON each run printed, copied from the notebook output.
 
 - **The memory saving comes from training only adapters, not from 4-bit storage.** LoRA, with a
   32-bit frozen base, peaks at 1.23 GB; QLoRA at 1.29 GB. What full fine-tuning adds is gradients
